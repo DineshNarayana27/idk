@@ -1,0 +1,201 @@
+import java.applet.*;
+import java.awt.*;
+import java.awt.event.*; // CRUCIAL: Unlocks all MouseListener, KeyListener, and Event classes
+
+/* 
+<applet code="InteractiveApplet" width=600 height=500> 
+</applet> 
+*/ 
+
+public class InteractiveApplet extends Applet 
+    implements MouseListener, MouseMotionListener, KeyListener {
+
+    // Global variables to track position, text state, and current color
+    int circleX = 250;
+    int circleY = 200;
+    String statusText = "Use Arrows to move circle, Click/Drag mouse to interact";
+    Color ballColor = Color.RED;
+
+    @Override
+    public void init() {
+        // Step 1: Set a custom window canvas background color (Alice Blue)
+        setBackground(Color.RED); 
+        
+        // Step 2: REGISTER LISTENERS so the applet listens to inputs
+        addMouseListener(this);
+        addMouseMotionListener(this);
+        addKeyListener(this);
+    }
+
+    @Override
+    public void paint(Graphics g) {
+        // Draw the instructional status string text near the top
+        g.setColor(Color.BLACK);
+        g.setFont(new Font("Arial", Font.BOLD, 14));
+        g.drawString(statusText, 30, 40);
+
+        // Draw the interactive circle driven dynamically by our variables
+        g.setColor(ballColor);
+        g.fillOval(circleX, circleY, 60, 60);
+    }
+
+    // --- MOUSE LISTENER IMPLEMENTATIONS ---
+    @Override
+    public void mouseClicked(MouseEvent e) {
+        statusText = "Mouse Clicked at: (" + e.getX() + ", " + e.getY() + ")";
+        ballColor = Color.BLUE; // Turn the circle blue when clicked
+        repaint(); // Force Java to refresh the screen and update visuals immediately
+    }
+
+    @Override
+    public void mousePressed(MouseEvent e) {}
+
+    @Override
+    public void mouseReleased(MouseEvent e) {
+
+        statusText="Mouse Released ";
+        repaint();
+    }
+
+    @Override
+    public void mouseEntered(MouseEvent e) {
+        statusText = "Mouse entered applet window.";
+        repaint();
+    }
+
+    @Override
+    public void mouseExited(MouseEvent e) {
+        statusText = "Mouse exited applet window.";
+        repaint();
+    }
+
+    
+
+    // --- MOUSE MOTION LISTENER IMPLEMENTATIONS ---
+    @Override
+    public void mouseMoved(MouseEvent e) {
+        // Track coordinate coordinates as cursor glides around the canvas
+        statusText = "Cursor Coordinates: " + e.getX() + ", " + e.getY();
+        repaint();
+    }
+
+    @Override
+    public void mouseDragged(MouseEvent e) {
+        // Teleport the circle's center coordinates to follow the mouse pointer trail
+        circleX = e.getX() - 30; 
+        circleY = e.getY() - 30;
+        statusText = "Dragging object...";
+        ballColor = Color.ORANGE; // Turn circle orange when dragging
+        repaint();
+    }
+
+    // --- KEY LISTENER IMPLEMENTATIONS ---
+    @Override
+    public void keyPressed(KeyEvent e) {
+        int keyCode = e.getKeyCode();
+        
+        // Intercept Arrow keys to shift position coordinates
+        if (keyCode == KeyEvent.VK_LEFT)  circleX -= 15;
+        if (keyCode == KeyEvent.VK_RIGHT) circleX += 15;
+        if (keyCode == KeyEvent.VK_UP)    circleY -= 15;
+        if (keyCode == KeyEvent.VK_DOWN)  circleY += 15;
+        
+        statusText = "Keyboard Key Pressed! Keycode: " + keyCode;
+        repaint();
+    }
+
+    @Override
+    public void keyReleased(KeyEvent e) {}
+
+    @Override
+    public void keyTyped(KeyEvent e) {
+        // Capture standard text key typings
+        statusText = "Character Typed: '" + e.getKeyChar() + "'";
+        repaint();
+    }
+}
+
+
+
+import java.applet.Applet;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.Graphics;
+
+/* 
+<applet code="BarChartApplet" width=600 height=450> 
+</applet> 
+*/ 
+
+public class BarChartApplet extends Applet {
+
+    // Sample data: Student names and their respective marks (out of 100)
+    String[] students = {"Alex", "Rahul", "John", "Priya", "Sam"};
+    int[] marks = {85, 45, 95, 70, 60};
+
+    @Override
+    public void init() {
+        setBackground(Color.WHITE);
+    }
+
+    @Override
+    public void paint(Graphics g) {
+        int startX = 80;         // Starting X coordinate for the first bar
+        int baseLineY = 350;     // The bottom baseline where all bars sit
+        int barWidth = 50;       // Width of each individual bar
+        int spacing = 40;        // Space between two consecutive bars
+
+        // Draw Chart Title
+        g.setColor(Color.BLACK);
+        g.setFont(new Font("Arial", Font.BOLD, 18));
+        g.drawString("Student Performance Bar Chart", 160, 40);
+
+        // Draw X and Y Axes lines
+        g.drawLine(60, 50, 60, baseLineY);          // Vertical Y-Axis
+        g.drawLine(60, baseLineY, 550, baseLineY);   // Horizontal X-Axis
+
+        // Draw Y-Axis Markings (Scale helpers)
+        g.setFont(new Font("Arial", Font.PLAIN, 12));
+        g.drawString("100", 30, 55);
+        g.drawString("50", 35, 205);
+        g.drawString("0", 40, baseLineY + 5);
+
+
+        //350 -50 =300  1 mark =3 pixels ,50 *3 =150   50+150 =200  , 
+
+        // Loop through the data to draw each student's bar
+        for (int i = 0; i < marks.length; i++) {
+            
+            // 1. Calculate a dynamic height. 
+            // Since marks are out of 100, we multiply by 3 to scale up pixels on screen (Max height = 300px)
+            int barHeight = marks[i] * 3; 
+
+            // 2. Calculate the exact X position for this specific bar
+            int x = startX + i * (barWidth + spacing);
+
+            // 3. Calculate top-left corner Y coordinate for the rectangle
+            // Remember: Java coordinates start from the TOP down, so we subtract height from the baseline
+            int y = baseLineY - barHeight;
+
+            // 4. Assign a color depending on pass/fail criteria (e.g., 50 is passing)
+            if (marks[i] >= 50) {
+                g.setColor(Color.BLUE);  // Blue for passing grades
+            } else {
+                g.setColor(Color.RED);   // Red for failing grades
+            }
+
+            // 5. Draw the solid bar
+            g.fillRect(x, y, barWidth, barHeight);
+
+            // 6. Draw the black outline around the bar
+            g.setColor(Color.BLACK);
+            g.drawRect(x, y, barWidth, barHeight);
+
+            // 7. Write the numerical marks above the bar
+            g.drawString(String.valueOf(marks[i]), x + 15, y - 10);
+
+            // 8. Write the student's name underneath the bar
+            g.drawString(students[i], x + 10, baseLineY + 20);
+        }
+    }
+}

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Java Applet Runner</title>
+    <!-- Load the emulator to run Java in modern browsers -->
+    <script src="https://leaningtech.com"></script>
+    <script>
+        cheerpjInit();
+    </script>
+</head>
+<body>
+    <h2>Lab Exam Simulation: Java Applet</h2>
+    
+    <!-- Visual container box for the applet output -->
+    <div id="applet_container"></div>
+
+    <script>
+        // Mounts the graphics display area
+        cheerpjCreateDisplay(300, 200, document.getElementById("applet_container"));
+        // Executes your compiled HelloWorld class file
+        cheerpjRunApplet("HelloWorld", "./");
+    </script>
+</body>
+</html>
