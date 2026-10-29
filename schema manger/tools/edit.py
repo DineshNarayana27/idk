@@ -28,6 +28,7 @@ applies the file's original curly style to new_string.
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import fnmatch
 import os
@@ -635,18 +636,20 @@ async def _call(
     # 1. Ensure parent directory exists (outside the atomic section)
     parent_dir = os.path.dirname(absolute)
     if parent_dir:
-        os.makedirs(parent_dir, exist_ok=True)
+        await asyncio.to_thread(os.makedirs, parent_dir, exist_ok=True)
 
     # 2. Snapshot for undo (idempotent; safe before staleness check)
     if _file_history_enabled():
-        _snapshot_for_undo(absolute)
+        await asyncio.to_thread(_snapshot_for_undo, absolute)
 
     # 3. Read current state
-    original, file_exists, encoding, endings = read_file_for_edit(absolute)
+    original, file_exists, encoding, endings = await asyncio.to_thread(
+        read_file_for_edit, absolute,
+    )
 
     # 4. TOCTOU re-check (same logic; raises instead of returning)
     if file_exists:
-        last_write = get_file_modification_time(absolute)
+        last_write = await asyncio.to_thread(get_file_modification_time, absolute)
         read_state = ctx.read_file_state.get(absolute) if ctx.read_file_state else None
         if not read_state or last_write > read_state.get("mtime", 0):
             is_full = (
@@ -668,12 +671,15 @@ async def _call(
     )
 
     # 7. Write to disk
-    write_text_content(absolute, updated, encoding, endings)
+    await asyncio.to_thread(
+        write_text_content, absolute, updated, encoding, endings,
+    )
 
     # 8. Update read cache with the post-edit content
     if ctx.read_file_state:
         ctx.read_file_state.set(
-            absolute, updated, get_file_modification_time(absolute),
+            absolute, updated,
+            await asyncio.to_thread(get_file_modification_time, absolute),
             offset=None, limit=None,
         )
 

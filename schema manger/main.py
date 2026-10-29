@@ -47,10 +47,12 @@ from todo import TodoWriteTool
 from tools.bash import BashTool
 from tools.edit import EditTool
 from tools.read import ReadTool
+from tools.write import WriteTool
 
 # ── Tool registration ──
 register(ReadTool)
 register(EditTool)
+register(WriteTool)
 register(BashTool)
 register(TodoWriteTool)
 register(MemorySearchTool)
@@ -64,6 +66,8 @@ Available tools:
   in 'N\\tline' format. Use offset/limit for large files.
 - Edit(file_path, old_string, new_string, replace_all?): replaces matching text
     in a file. Read the file first.
+- Write(file_path, content): creates a file or replaces its full contents.
+    Read existing files first; prefer Edit for targeted changes.
 - Bash(command, timeout?, description?): runs a shell command.
 - TodoWrite(todos): updates the current task list.
 - MemorySearch(query, limit?): searches this session's saved messages.

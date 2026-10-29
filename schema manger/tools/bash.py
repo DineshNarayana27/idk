@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import signal
 import shlex
 import tempfile
 from typing import Any
@@ -93,6 +95,10 @@ _SEMANTIC_EXIT_CODES: dict[str, dict[int, str]] = {
     "pytest":     {1: "tests failed"},
 }
 
+_HEREDOC_MARKER = re.compile(
+    r"(?<!<)<<(?!<)(-?)\s*(?:'([^']+)'|\"([^\"]+)\"|([^\s;&|]+))"
+)
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # Compound-command splitting
@@ -127,6 +133,25 @@ def split_compound_command(command: str) -> list[str]:
     if buf:
         parts.append("".join(buf).strip())
     return [p for p in parts if p]
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Keep shell syntax and redirection paths; exclude literal heredoc data."""
+    retained: list[str] = []
+    delimiters: list[tuple[str, bool]] = []
+    for line in command.splitlines():
+        if delimiters:
+            delimiter, strip_tabs = delimiters[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                delimiters.pop(0)
+            continue
+
+        retained.append(line)
+        for match in _HEREDOC_MARKER.finditer(line):
+            delimiter = next(group for group in match.groups()[1:] if group is not None)
+            delimiters.append((delimiter, bool(match.group(1))))
+    return "\n".join(retained)
 
 
 def _tokenize(command: str) -> list[str]:
@@ -350,6 +375,7 @@ async def _call(
             cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name == "posix",
         )
     except OSError as e:
         return ToolResult(data={
@@ -362,21 +388,35 @@ async def _call(
             "fullOutputPath": None,
         })
 
+    stdout_task = asyncio.create_task(_drain_pipe(proc.stdout, on_progress, "stdout"))
+    stderr_task = asyncio.create_task(_drain_pipe(proc.stderr, on_progress, "stderr"))
+    wait_task = asyncio.create_task(proc.wait())
+    abort_controller = getattr(ctx, "abort_controller", None)
+    abort_task = (
+        asyncio.create_task(_wait_for_abort(abort_controller))
+        if abort_controller is not None else None
+    )
+
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout_s,
+        waiters = [wait_task]
+        if abort_task is not None:
+            waiters.append(abort_task)
+        done, _ = await asyncio.wait(
+            waiters, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED,
         )
-        interrupted = False
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            stdout_b, stderr_b = await proc.communicate()
-        except Exception:
-            stdout_b, stderr_b = b"", b""
-        interrupted = True
+        interrupted = wait_task not in done
+        if interrupted:
+            await _terminate_process(proc)
+        stdout_b, stderr_b = await asyncio.gather(stdout_task, stderr_task)
+    except asyncio.CancelledError:
+        await _terminate_process(proc)
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        raise
+    finally:
+        if abort_task is not None:
+            if not abort_task.done():
+                abort_task.cancel()
+            await asyncio.gather(abort_task, return_exceptions=True)
 
     stdout = _decode(stdout_b)
     stderr = _decode(stderr_b)
@@ -420,6 +460,61 @@ async def _call(
         "fullOutputPath": full_output_path,
         "noOutputExpected": is_silent_command(cmd),
     })
+
+
+async def _drain_pipe(stream, on_progress, stream_name: str) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if on_progress is not None:
+            try:
+                on_progress({
+                    "type": "bash_progress",
+                    "stream": stream_name,
+                    "output": _decode(chunk),
+                })
+            except Exception:
+                pass
+    return b"".join(chunks)
+
+
+async def _wait_for_abort(controller) -> None:
+    if getattr(controller, "aborted", False):
+        return
+    wait = getattr(controller, "wait", None)
+    if callable(wait):
+        await wait()
+        return
+    while not getattr(controller, "aborted", False):
+        await asyncio.sleep(0.05)
+
+
+async def _terminate_process(proc) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=1.0)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
 
 
 def _decode(raw: bytes) -> str:
@@ -503,7 +598,8 @@ async def _check_permissions(input: BashInput, ctx: ToolUseContext):
     """Delegate to path_safety for protected-path detection. The gauntlet's
     stages 1a/1b (deny/ask rules) run BEFORE this — deny rules still win."""
     try:
-        for subcommand in split_compound_command(input.command):
+        command = _strip_heredoc_bodies(input.command)
+        for subcommand in split_compound_command(command):
             for token in _tokenize(subcommand)[1:]:
                 if token.startswith("-"):
                     continue

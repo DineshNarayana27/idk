@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Generator
 
 from execute import execute_tool, ExecutionResult, _error_result
-from messages import ToolResultMessage
+from messages import (
+    ToolResultMessage, create_progress_message,
+)
 from registry import find
 from tool import Tool, ToolUseContext
 from loop_guard import LoopGuardState
@@ -51,10 +53,12 @@ class _TrackedTool:
     assistant_message: Any
     status: str = "queued"          # queued | executing | completed | yielded
     is_concurrency_safe: bool = False
+    is_speculative_safe: bool = False
     promise: asyncio.Task | None = None
     results: list = field(default_factory=list)
     pending_progress: list = field(default_factory=list)
     context_modifiers: list = field(default_factory=list)
+    abort_controller: Any = None
 
 
 # ── The executor ─────────────────────────────────────────────────────────
@@ -81,13 +85,28 @@ class StreamingToolExecutor:
         )
 
         self.discarded = False
+        self.deferred_tools_released = False
         self.progress_available_resolve = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def discard(self) -> None:
-        """Mark discarded — results from the failed attempt are abandoned."""
+        """Cancel speculative work and abandon results from this attempt."""
+        if self.discarded:
+            return
         self.discarded = True
+        for tool in self.tools:
+            if tool.abort_controller is not None:
+                tool.abort_controller.abort("streaming_fallback")
+            if tool.promise is not None and not tool.promise.done():
+                tool.promise.cancel()
+
+    def release_deferred_tools(self) -> None:
+        """Allow non-concurrency-safe tools after the model stream succeeds."""
+        if self.discarded:
+            return
+        self.deferred_tools_released = True
+        self.process_queue()
 
     def add_tool(self, block: dict, assistant_message: Any) -> None:
         """Queue a tool. Starts immediately if conditions allow."""
@@ -110,11 +129,17 @@ class StreamingToolExecutor:
         except Exception:
             parsed = None
 
+        is_speculative_safe = False
         if parsed is not None:
             try:
                 is_safe = bool(tool_definition.is_concurrency_safe(parsed))
             except Exception:
                 is_safe = False
+            if tool_definition.name != BASH_TOOL_NAME:
+                try:
+                    is_speculative_safe = bool(tool_definition.is_read_only(parsed))
+                except Exception:
+                    is_speculative_safe = False
         else:
             is_safe = False
 
@@ -124,6 +149,7 @@ class StreamingToolExecutor:
             assistant_message=assistant_message,
             status="queued",
             is_concurrency_safe=is_safe,
+            is_speculative_safe=is_speculative_safe,
         ))
         self.process_queue()
 
@@ -138,9 +164,13 @@ class StreamingToolExecutor:
 
     def process_queue(self) -> None:
         """Iterate in order. Start queued tools when safe. Break on serial."""
+        if self.discarded:
+            return
         for tool in self.tools:
             if tool.status != "queued":
                 continue
+            if not tool.is_speculative_safe and not self.deferred_tools_released:
+                break
             if self.can_execute_tool(tool.is_concurrency_safe):
                 self._start_tool(tool)
             else:
@@ -175,11 +205,16 @@ class StreamingToolExecutor:
 
         # Per-tool child of sibling_abort_controller
         tool_abort = _ChildAbortController(self.sibling_abort_controller)
+        tool.abort_controller = tool_abort
         _install_bubble_up(
             tool_abort, self.tool_use_context.abort_controller, self,
         )
 
         this_tool_errored = False
+        loop = asyncio.get_running_loop()
+
+        def on_progress(data: dict) -> None:
+            loop.call_soon_threadsafe(self._enqueue_progress, tool, data)
 
         try:
             result: ExecutionResult = await execute_tool(
@@ -187,6 +222,7 @@ class StreamingToolExecutor:
                 _override_abort_controller(self.tool_use_context, tool_abort),
                 self.can_use_tool,
                 tool.assistant_message,
+                on_progress,
             )
         except asyncio.CancelledError:
             messages.append(self._create_synthetic_error(
@@ -235,6 +271,17 @@ class StreamingToolExecutor:
                     self.tool_use_context = modifier(self.tool_use_context)
                 except Exception as e:
                     logger.error("Context modifier failed: %s", e)
+
+    def _enqueue_progress(self, tool: _TrackedTool, data: dict) -> None:
+        tool.pending_progress.append(create_progress_message(
+            tool.id,
+            self.tool_use_context.tool_use_id or "",
+            data,
+        ))
+        resolve = self.progress_available_resolve
+        self.progress_available_resolve = None
+        if resolve is not None:
+            resolve()
 
     # ── Abort handling ───────────────────────────────────────────────────
 
@@ -417,6 +464,7 @@ class _ChildAbortController:
         self._reason: Any = None
         self._parent = parent
         self._listeners: list = []
+        self._event = asyncio.Event()
 
     @property
     def aborted(self) -> bool:
@@ -439,6 +487,7 @@ class _ChildAbortController:
             return
         self._aborted = True
         self._reason = reason
+        self._event.set()
         for fn in list(self._listeners):
             try:
                 fn()
@@ -447,6 +496,32 @@ class _ChildAbortController:
 
     def add_listener(self, fn) -> None:
         self._listeners.append(fn)
+
+    async def wait(self) -> None:
+        """Wait for this controller or any parent controller to abort."""
+        if self.aborted:
+            return
+        waiters = [asyncio.create_task(self._event.wait())]
+        if self._parent is not None:
+            waiters.append(asyncio.create_task(_wait_for_abort_signal(self._parent)))
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+
+async def _wait_for_abort_signal(controller: Any) -> None:
+    if getattr(controller, "aborted", False):
+        return
+    wait = getattr(controller, "wait", None)
+    if callable(wait):
+        await wait()
+        return
+    while not getattr(controller, "aborted", False):
+        await asyncio.sleep(0.05)
 
 
 def _install_bubble_up(
@@ -504,13 +579,11 @@ def _synthetic_no_such_tool(block: dict) -> ToolResultMessage:
 
 
 async def _race_first(awaitables: list) -> None:
-    """Wait for any of the awaitables to complete. Cancels the rest."""
+    """Wait for any awaitable to complete without cancelling pending work."""
     futures = [
         a if isinstance(a, asyncio.Future) else asyncio.ensure_future(a)
         for a in awaitables
     ]
-    done, pending = await asyncio.wait(
+    await asyncio.wait(
         futures, return_when=asyncio.FIRST_COMPLETED,
     )
-    for p in pending:
-        p.cancel()

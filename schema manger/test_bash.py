@@ -26,11 +26,11 @@ def make_ctx(mode="bypassPermissions"):
     )
 
 
-async def _bash(ctx, command, **kwargs):
+async def _bash(ctx, command, on_progress=None, **kwargs):
     return await execute_tool(
         {"id": "tu", "name": "Bash",
          "input": {"command": command, **kwargs}},
-        ctx,
+        ctx, on_progress=on_progress,
     )
 
 
@@ -60,6 +60,19 @@ async def main():
     # Redirects imply writing
     assert is_read_only_command("ls > /tmp/out") is False
     print("✅ is_read_only classifier OK")
+
+    # ═══ 2b. Heredoc content is not classified as a filesystem path ═══
+    heredoc_input = BashInput(command=(
+        "cat > api.md <<'EOF'\n"
+        "Example contains ... in prose\n"
+        "EOF"
+    ))
+    heredoc_decision = await BashTool.check_permissions(heredoc_input, make_ctx())
+    assert heredoc_decision.behavior == "allow", heredoc_decision.message
+    suspicious_path_input = BashInput(command="cat '.../api.md'")
+    path_decision = await BashTool.check_permissions(suspicious_path_input, make_ctx())
+    assert path_decision.behavior == "deny"
+    print("✅ Heredoc path-safety classification OK")
 
     # ═══ 3. is_destructive ═══
     assert is_destructive_command("rm -rf build") is True
@@ -118,28 +131,64 @@ async def main():
     assert "interrupted" in res.result_message.content.lower()
     print("✅ Timeout interrupts OK")
 
-    # ═══ 10. Destructive path refused ═══
+    # ═══ 10. Abort signal interrupts a running process ═══
+    class AbortController:
+        def __init__(self):
+            self.aborted = False
+            self.event = asyncio.Event()
+
+        async def wait(self):
+            await self.event.wait()
+
+        def abort(self):
+            self.aborted = True
+            self.event.set()
+
+    ctx = make_ctx()
+    abort_controller = AbortController()
+    ctx.abort_controller = abort_controller
+    task = asyncio.create_task(_bash(ctx, "sleep 5"))
+    await asyncio.sleep(0.1)
+    abort_controller.abort()
+    res = await asyncio.wait_for(task, timeout=2)
+    assert res.is_error
+    assert "interrupted" in res.result_message.content.lower()
+    print("✅ Abort signal interrupts running process OK")
+
+    # ═══ 11. Output chunks reach the progress callback ═══
+    progress = []
+    ctx = make_ctx()
+    res = await _bash(
+        ctx, "printf 'first\\n'; sleep 0.1; printf 'second\\n'",
+        on_progress=progress.append,
+    )
+    assert not res.is_error
+    assert any("first" in item["output"] for item in progress)
+    assert any("second" in item["output"] for item in progress)
+    print("✅ Incremental output progress OK")
+
+    # ═══ 12. Destructive path refused ═══
     ctx = make_ctx()
     res = await _bash(ctx, "rm -rf /")
     assert res.is_error
     assert "dangerous removal path" in res.result_message.content
     print("✅ Dangerous removal refused OK")
 
-    # ═══ 11. Empty command rejected ═══
+    # ═══ 13. Empty command rejected ═══
     ctx = make_ctx()
     res = await _bash(ctx, "")
     assert res.is_error
     assert "Empty command" in res.result_message.content
     print("✅ Empty command rejected OK")
 
-    # ═══ 12. Timeout > max rejected ═══
+    # ═══ 14. Timeout > max rejected ═══
     ctx = make_ctx()
     res = await _bash(ctx, "ls", timeout=MAX_TIMEOUT_MS + 1)
     assert res.is_error
     assert "exceeds the maximum" in res.result_message.content
     print("✅ Timeout > max rejected OK")
 
-    # ═══ 13. Output truncation ═══
+    # ═══ 15. Output truncation ═══
     ctx = make_ctx()
     # 40K chars of output > 30K limit
     res = await _bash(ctx, "python3 -c \"print('x' * 40000)\"")
@@ -148,13 +197,13 @@ async def main():
     assert "Read to see more" in res.result_message.content
     print("✅ Output truncation OK")
 
-    # ═══ 14. is_silent_command ═══
+    # ═══ 16. is_silent_command ═══
     from tools.bash import is_silent_command
     assert is_silent_command("mv a b") is True
     assert is_silent_command("echo hi") is False
     print("✅ is_silent_command OK")
 
-    # ═══ 15. Tool metadata ═══
+    # ═══ 17. Tool metadata ═══
     assert BashTool.name == "Bash"
     assert BashTool.max_result_size_chars == 30_000
     assert BashTool.is_read_only(BashInput(command="ls")) is True

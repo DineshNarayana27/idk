@@ -38,12 +38,12 @@ def main():
         import query_token_budget, query_stop_hooks
         import query, compact
         import memory_injector, memory_tools, main, todo
-        import tools.read, tools.edit, tools.bash
+        import tools.read, tools.edit, tools.write, tools.bash
     check("All modules import", imports)
 
     def cli_tools_registered():
         from registry import find
-        expected = ("Read", "Edit", "Bash", "TodoWrite", "MemorySearch", "MemoryExpand")
+        expected = ("Read", "Edit", "Write", "Bash", "TodoWrite", "MemorySearch", "MemoryExpand")
         missing = [name for name in expected if find(name) is None]
         assert not missing, f"CLI tools not registered: {missing}"
     check("CLI tool registration", cli_tools_registered)

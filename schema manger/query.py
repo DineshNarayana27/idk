@@ -484,11 +484,17 @@ async def query_loop(
                         pass
                     attempt_with_fallback = True
                     continue
+                if executor is not None:
+                    executor.discard()
                 raise
+
+        if executor is not None and not _is_aborted(ctx):
+            executor.release_deferred_tools()
 
         # ── Abort during streaming ──
         if _is_aborted(ctx):
             if executor is not None:
+                executor.discard()
                 async for update in executor.get_remaining_results():
                     if update.message is not None:
                         yield update.message
