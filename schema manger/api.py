@@ -21,6 +21,8 @@ Compared to claude.ts (~2000 lines, Anthropic-native):
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import os
@@ -345,6 +347,7 @@ async def stream(
     model: str | None = None,
     max_tokens: int = 8192,
     enable_thinking: bool | None = None,
+    signal: Any = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream a model response with normalized events.
 
@@ -356,6 +359,13 @@ async def stream(
       {"type": "message_stop", "stop_reason": str, "usage": dict, "model": str}
     """
     target_model = model or ACTIVE_MODEL
+    if _signal_aborted(signal):
+        yield {"type": "message_start", "model": target_model}
+        yield {
+            "type": "message_stop", "stop_reason": "interrupted",
+            "usage": _empty_usage(), "model": target_model,
+        }
+        return
     oai_messages = to_openai(messages)
 
     # Apply cache control + media stripping
@@ -391,7 +401,7 @@ async def stream(
     final_usage: dict | None = None
 
     try:
-        async for chunk in response:
+        async for chunk in _iterate_response(response, signal):
             usage = _extract_usage(chunk)
             if usage is not None:
                 final_usage = usage
@@ -439,6 +449,13 @@ async def stream(
             logger.error("Non-streaming fallback failed: %s", e2)
             raise e
 
+    if _signal_aborted(signal):
+        yield {
+            "type": "message_stop", "stop_reason": "interrupted",
+            "usage": final_usage or _empty_usage(), "model": target_model,
+        }
+        return
+
     # Emit tool calls after the stream (fragments are fully assembled)
     for tc in accumulator.assemble():
         yield {"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": tc["input"]}
@@ -461,6 +478,68 @@ async def stream(
         "text": "".join(text_buf) if text_buf else None,
         "thinking": "".join(thinking_buf) if thinking_buf else None,
     }
+
+
+def _empty_usage() -> dict[str, int]:
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+
+
+def _signal_aborted(signal: Any) -> bool:
+    return signal is not None and bool(getattr(signal, "aborted", False))
+
+
+async def _wait_for_abort(signal: Any) -> None:
+    if _signal_aborted(signal):
+        return
+    wait = getattr(signal, "wait", None)
+    if callable(wait):
+        await wait()
+        return
+    while not _signal_aborted(signal):
+        await asyncio.sleep(0.05)
+
+
+async def _iterate_response(response: Any, signal: Any):
+    iterator = response.__aiter__()
+    while True:
+        if _signal_aborted(signal):
+            break
+        next_task = asyncio.create_task(iterator.__anext__())
+        abort_task = (
+            asyncio.create_task(_wait_for_abort(signal))
+            if signal is not None else None
+        )
+        if abort_task is None:
+            try:
+                yield await next_task
+            except StopAsyncIteration:
+                return
+            continue
+
+        done, _ = await asyncio.wait(
+            (next_task, abort_task), return_when=asyncio.FIRST_COMPLETED,
+        )
+        if abort_task in done:
+            next_task.cancel()
+            await asyncio.gather(next_task, return_exceptions=True)
+            break
+        abort_task.cancel()
+        await asyncio.gather(abort_task, return_exceptions=True)
+        try:
+            yield next_task.result()
+        except StopAsyncIteration:
+            return
+
+    close = getattr(iterator, "aclose", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
 
 # ── Fallback on rate limit ──────────────────────────────────────────────

@@ -21,3 +21,4 @@ google-genai>=1.0.0
 openai>=1.40.0
 pandas>=2.0.0
 openpyxl>=3.1.0
+textual>=0.70.0

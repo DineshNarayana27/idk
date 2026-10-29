@@ -179,6 +179,43 @@ async def main():
     assert stop["stop_reason"] == "end_turn"
     print("✅ Streaming text OK")
 
+    # ── Abort closes a pending provider stream without emitting partial tools ──
+    class AbortSignal:
+        def __init__(self):
+            self.aborted = False
+            self.event = asyncio.Event()
+
+        async def wait(self):
+            await self.event.wait()
+
+        def abort(self):
+            self.aborted = True
+            self.event.set()
+
+    async def stalled_response():
+        yield mock_chunk(text="partial response")
+        await asyncio.Event().wait()
+
+    mock_litellm.acompletion.reset_mock()
+    mock_litellm.acompletion.return_value = stalled_response()
+    abort_signal = AbortSignal()
+    events = []
+    async for event in stream(
+        [create_user_message("wait")],
+        enable_thinking=False,
+        signal=abort_signal,
+    ):
+        events.append(event)
+        if event["type"] == "text_delta":
+            abort_signal.abort()
+    assert [event["text"] for event in events if event["type"] == "text_delta"] == [
+        "partial response",
+    ]
+    stop = next(event for event in events if event["type"] == "message_stop")
+    assert stop["stop_reason"] == "interrupted"
+    assert not any(event["type"] == "tool_use" for event in events)
+    print("✅ Abort closes provider stream cleanly OK")
+
     # ── Streaming tool call ──
     mock_litellm.acompletion.reset_mock()
     tc1 = MagicMock(index=0, id="call_x")

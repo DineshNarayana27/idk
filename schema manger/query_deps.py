@@ -77,10 +77,11 @@ def _production_call_model(
     """
     return _adapter_gen(
         messages=messages, system_prompt=system_prompt, tools=tools or [],
+        signal=signal,
     )
 
 
-async def _adapter_gen(messages, system_prompt, tools):
+async def _adapter_gen(messages, system_prompt, tools, signal=None):
     from api import stream
     from messages import ToolUseBlock, create_assistant_message
 
@@ -97,7 +98,9 @@ async def _adapter_gen(messages, system_prompt, tools):
     stop_reason: str | None = None
     usage: dict | None = None
 
-    async for event in stream(messages=messages, tools=tools, system_prompt=sp):
+    async for event in stream(
+        messages=messages, tools=tools, system_prompt=sp, signal=signal,
+    ):
         t = event.get("type")
         if t == "text_delta":
             text_buf.append(event["text"])
